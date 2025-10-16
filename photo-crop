@@ -1,0 +1,139 @@
+You are helping in a Spring Framework 5.3 (non-Boot) MVC app with JSP views, Java 8, jQuery on the page, and Cropper.js for image cropping. The goal is to add an “Upload ID Photo” feature on an existing JSP page, using Cropper.js with a UK passport aspect ratio (35x45), and save the cropped image immediately via our existing endpoints.
+
+Important:
+- We already have a CRUD controller for photos. Do NOT create a new controller name or new base path.
+- Use the existing endpoints:
+  - POST /userPhotos/uploadPhoto/{id}          // {id} is the userId; consumes multipart/form-data, part name: "file"
+  - GET  /userPhotos/userPhoto/{employeeNo}    // returns the latest user photo as an image stream (use this for preview/link)
+- We use jQuery. jquery.Jcrop v0.9.8 may be present in the codebase, but DO NOT initialize or use Jcrop. Use Cropper.js only.
+- Java 8. No Lombok.
+
+What to generate (produce code blocks labeled by file path):
+
+1) WEB-INF/jsp/partials/id-photo-fragment.jsp
+   - A JSP fragment that:
+     - Imports JSTL core taglib.
+     - Receives from model: currentUserId (Long), employeeNo (String), hasPendingPhoto (boolean).
+     - Renders:
+       - “Upload ID Photo” link/button that opens a custom modal (no Bootstrap).
+       - If hasPendingPhoto=true, render a “Use existing photo (pending approval)” link pointing to: ${contextPath}/userPhotos/userPhoto/${employeeNo}
+     - The modal contains:
+       - A short list of photo guidelines and a small reference image (UK passport guidelines).
+       - <input type="file" accept="image/*"> for user selection.
+       - <img id="cropperImage"> where Cropper initializes with aspectRatio 35/45.
+       - A <canvas id="idPhotoPreview"> for live preview of the cropped output.
+       - “Save” and “Cancel” buttons; Save is disabled until cropper is ready.
+     - Minimal CSS for overlay + modal (centered box, overlay backdrop).
+     - Includes the Cropper assets (local static paths):
+         <link rel="stylesheet" href="${pageContext.request.contextPath}/static/cropper/cropper.min.css">
+         <script src="${pageContext.request.contextPath}/static/cropper/cropper.min.js"></script>
+     - Adds CSRF meta tags usage if present:
+         <meta name="_csrf" content="${_csrf.token}"/>
+         <meta name="_csrf_header" content="${_csrf.headerName}"/>
+     - Sets a small global object for the JS:
+         window.APP = {
+           contextPath: '${pageContext.request.contextPath}',
+           userId: '${currentUserId}',
+           employeeNo: '${employeeNo}'
+         };
+
+2) src/main/webapp/static/js/id-photo.js
+   - Self-contained IIFE with jQuery that wires the fragment:
+     - Opens/closes the modal, destroys Cropper instance on close, resets state.
+     - On file change: validate type (JPEG/PNG), load into <img>, create Cropper with:
+         aspectRatio: 35/45, viewMode: 1, autoCropArea: 1, movable: true, zoomable: true, background: false
+     - Live preview: in crop callback, draw getCroppedCanvas({ width: 700, height: 900 }) into #idPhotoPreview canvas.
+     - On Save:
+       - canvas.toBlob('image/jpeg', 0.92) -> build FormData { file: Blob("id-photo.jpg") }
+       - AJAX POST to: `${APP.contextPath}/userPhotos/uploadPhoto/${APP.userId}`
+       - Content-Type: multipart/form-data (use processData:false, contentType:false)
+       - If CSRF meta tags are present, add header.
+       - Show saving state, handle success (close modal) and failure (alert error, re-enable Save).
+     - Do not reference or initialize jquery.Jcrop anywhere.
+
+3) Update notes for existing controller (same class you already have):
+   - Show or update the POST /userPhotos/uploadPhoto/{id} handler to:
+     - Accept @PathVariable("id") Long userId and @RequestParam("file") MultipartFile file
+     - Validate:
+       - not empty
+       - contentType image/jpeg or image/png
+       - size <= 5 MB
+       - ImageIO.read(...) to confirm image and capture width/height
+       - optionally reject tiny images (width < 350 or height < 450)
+     - Call a service method to “save or replace” the user’s NOT-APPROVED (pending) photo:
+         userPhotoService.saveOrReplacePending(userId, bytes, contentType, width, height);
+     - Return 200 with {"status":"ok"} or 400 with {"error":"..."} on validation failure.
+   - Show or update the GET /userPhotos/userPhoto/{employeeNo} handler to:
+     - Stream the latest photo for that employee number as bytes with correct Content-Type (e.g., image/jpeg), and Cache-Control: no-store.
+     - If none, return 404.
+
+4) src/main/java/.../service/UserPhotoService.java
+   - @Service with constructor injection of UserPhotoRepository.
+   - @Transactional method:
+       public void saveOrReplacePending(Long userId, byte[] bytes, String contentType, int width, int height)
+     - Logic:
+       - Find existing “pending” photo for the user (status=PENDING or approved=false in your schema).
+       - If found, update blob/contentType/width/height and keep PENDING.
+       - If not found, create a new record with status PENDING.
+       - repo.save(entity).
+   - Java 8, no Lombok.
+   - If your schema uses approved=false instead of enum, include a short comment showing how to switch the repository finder and field.
+
+5) src/main/java/.../repo/UserPhotoRepository.java
+   - Spring Data JPA interface extending JpaRepository<UserPhoto, Long>.
+   - Add finder(s) to support pending lookup, e.g.:
+       Optional<UserPhoto> findFirstByUserIdAndStatusOrderByIdDesc(Long userId, UserPhoto.ApprovalStatus status);
+     and (optional fallback)
+       Optional<UserPhoto> findFirstByUserIdOrderByIdDesc(Long userId);
+
+6) src/main/java/.../domain/UserPhoto.java  (only if fields are missing)
+   - JPA entity with fields:
+     - id (Long, IDENTITY)
+     - userId (Long)
+     - @Lob @Basic(fetch = LAZY) byte[] photo  -> map to column "photo_blob"
+     - contentType (String, len 64)            -> "content_type"
+     - width (Integer)                         -> "width_px"
+     - height (Integer)                        -> "height_px"
+     - status (enum PENDING/APPROVED/REJECTED) -> @Enumerated STRING
+   - Comment that PENDING means “not approved yet”.
+
+7) Multipart config snippet (include only if missing):
+   - @Bean StandardServletMultipartResolver in Spring @Configuration
+   - web.xml <multipart-config> under DispatcherServlet with 5MB limits
+
+Implementation details and expectations:
+
+- JSP fragment:
+  - Include JSTL taglib at top:
+      <%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core" %>
+  - Use model attributes: currentUserId, employeeNo, hasPendingPhoto
+  - Render “Use existing photo” link only if hasPendingPhoto=true:
+      <c:if test="${hasPendingPhoto}">
+        <a href="${pageContext.request.contextPath}/userPhotos/userPhoto/${employeeNo}" target="_blank">Use existing photo (pending approval)</a>
+      </c:if>
+
+- JS behaviors:
+  - Disable Save until Cropper is ready.
+  - On close, destroy Cropper and clear file input, image src, and preview canvas.
+  - Validate selected file type with /^image\/(jpeg|png|jpg)$/i and size (optional client-side guard).
+  - Example AJAX:
+      var csrf = getCsrf(); // read from meta
+      $.ajax({
+        url: APP.contextPath + '/userPhotos/uploadPhoto/' + APP.userId,
+        method: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        beforeSend: function(xhr){ if (csrf) xhr.setRequestHeader(csrf.header, csrf.token); }
+      })
+  - Live preview: draw getCroppedCanvas({ width: 700, height: 900 }) into #idPhotoPreview
+
+- Controller POST:
+  - Validate with ImageIO.read(...) and return JSON errors with ResponseEntity.badRequest()
+  - On success: ResponseEntity.ok("{\"status\":\"ok\"}")
+
+- Keep code Java 8 compatible. No Lombok. Use constructor injection.
+- Keep the modal CSS minimal, no Bootstrap required.
+- Do not initialize or reference jquery.Jcrop anywhere.
+
+Now generate the files listed above, each in its own code block with the requested paths and complete contents (ready to paste). If a file already exists in a typical project, output only the relevant method/class updates as requested in items (3)-(7). Keep the code consistent and production-ready.
