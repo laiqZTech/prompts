@@ -1,0 +1,430 @@
+<link rel="stylesheet" href="${pageContext.request.contextPath}/static/cropper/cropper.min.css">
+<script src="${pageContext.request.contextPath}/static/cropper/cropper.min.js"></script>
+
+
+<%-- Assume these are provided by your controller model --%>
+<c:set var="userId" value="${currentUser.id}" />
+<c:set var="hasPendingPhoto" value="${hasPendingPhoto}" />
+
+<div class="id-photo-actions">
+  <a href="#" id="openIdPhotoModal">Upload ID Photo</a>
+  <c:if test="${hasPendingPhoto}">
+    <span class="sep">|</span>
+    <a href="${pageContext.request.contextPath}/user/photo/preview?userId=${userId}" target="_blank">
+      Use existing photo (pending approval)
+    </a>
+  </c:if>
+</div>
+
+<style>
+  /* Simple modal without Bootstrap */
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:9998; }
+  .modal-box { display:none; position:fixed; top:5%; left:50%; transform:translateX(-50%); width: min(900px, 96vw);
+               max-height: 90vh; overflow:auto; background:#fff; border-radius:6px; padding:16px; z-index:9999; }
+  .modal-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .modal-body { display:grid; grid-template-columns: 280px 1fr; gap:16px; }
+  .guide { border:1px solid #ddd; padding:8px; }
+  .guide img { max-width:100%; height:auto; display:block; }
+  .crop-area { border:1px dashed #bbb; min-height: 420px; display:flex; align-items:center; justify-content:center; background:#fafafa; }
+  .preview { margin-top:8px; border:1px solid #eee; padding:8px; }
+  .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+  .hidden { display:none !important; }
+</style>
+
+<div class="modal-overlay" id="idPhotoOverlay"></div>
+
+<div class="modal-box" id="idPhotoModal" role="dialog" aria-modal="true" aria-labelledby="idPhotoTitle">
+  <div class="modal-header">
+    <h3 id="idPhotoTitle">Upload and Crop ID Photo</h3>
+    <button type="button" id="closeIdPhotoModal" aria-label="Close">✕</button>
+  </div>
+
+  <div class="modal-body">
+    <div class="guide">
+      <p><strong>Guidelines</strong></p>
+      <ul>
+        <li>Neutral expression, plain light background</li>
+        <li>Face centered, head fully visible</li>
+        <li>No hats or sunglasses</li>
+      </ul>
+      <img src="${pageContext.request.contextPath}/static/img/uk-passport-guidelines.png" alt="UK passport photo guideline">
+      <div class="preview">
+        <p><strong>Preview</strong></p>
+        <canvas id="idPhotoPreview" style="max-width:100%;"></canvas>
+      </div>
+    </div>
+
+    <div>
+      <div>
+        <input type="file" id="idPhotoFile" accept="image/*">
+      </div>
+      <div class="crop-area">
+        <img id="cropperImage" alt="Selected photo" class="hidden">
+        <div id="cropperPlaceholder" class="placeholder">Choose a photo to start cropping…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-footer">
+    <button type="button" id="saveCroppedPhoto" disabled>Save</button>
+    <button type="button" id="cancelIdPhoto">Cancel</button>
+  </div>
+</div>
+
+
+
+---------
+
+<script>
+(function($) {
+  var cropper = null;
+  var $overlay = $('#idPhotoOverlay');
+  var $modal = $('#idPhotoModal');
+  var $img = $('#cropperImage');
+  var $file = $('#idPhotoFile');
+  var $save = $('#saveCroppedPhoto');
+  var $preview = document.getElementById('idPhotoPreview');
+  var $placeholder = $('#cropperPlaceholder');
+
+  // If Spring Security CSRF is enabled, expose tokens in your layout head:
+  // <meta name="_csrf" content="${_csrf.token}"/>
+  // <meta name="_csrf_header" content="${_csrf.headerName}"/>
+  function getCsrf() {
+    var token = $('meta[name="_csrf"]').attr('content');
+    var header = $('meta[name="_csrf_header"]').attr('content');
+    return token && header ? { header: header, token: token } : null;
+  }
+
+  function openModal() {
+    $overlay.show();
+    $modal.show();
+  }
+  function closeModal() {
+    $modal.hide();
+    $overlay.hide();
+    teardownCropper();
+    resetUI();
+  }
+
+  function resetUI() {
+    $img.addClass('hidden').attr('src', '');
+    $placeholder.show();
+    $file.val('');
+    $save.prop('disabled', true);
+    // clear preview
+    var ctx = $preview.getContext('2d');
+    ctx && ctx.clearRect(0,0,$preview.width,$preview.height);
+  }
+
+  function teardownCropper() {
+    if (cropper) {
+      try { cropper.destroy(); } catch (e) {}
+      cropper = null;
+    }
+  }
+
+  function initCropper() {
+    teardownCropper();
+    // UK passport: 35mm x 45mm -> aspect 35/45 ≈ 0.777...
+    cropper = new Cropper($img[0], {
+      aspectRatio: 35 / 45,
+      viewMode: 1,           // restrict the crop box to not exceed the size of the canvas
+      autoCropArea: 1,       // fill the image
+      movable: true,
+      zoomable: true,
+      rotatable: false,
+      scalable: false,
+      background: false,
+      ready() {
+        $save.prop('disabled', false);
+        updatePreview();
+      },
+      crop() {
+        updatePreview();
+      }
+    });
+  }
+
+  function updatePreview() {
+    if (!cropper) return;
+    // Target output size. Adjust to your server policy if needed.
+    var canvas = cropper.getCroppedCanvas({ width: 700, height: 900 });
+    if (!canvas) return;
+    // Draw on preview <canvas>
+    $preview.width = canvas.width;
+    $preview.height = canvas.height;
+    var ctx = $preview.getContext('2d');
+    ctx.drawImage(canvas, 0, 0);
+  }
+
+  function objectUrlFromFile(file) {
+    return (window.URL || window.webkitURL).createObjectURL(file);
+  }
+
+  $('#openIdPhotoModal').on('click', function(e) {
+    e.preventDefault();
+    openModal();
+  });
+
+  $('#closeIdPhotoModal, #cancelIdPhoto, #idPhotoOverlay').on('click', function() {
+    closeModal();
+  });
+
+  $file.on('change', function() {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    if (!/^image\/(jpeg|png|jpg)$/i.test(file.type)) {
+      alert('Please select a JPEG or PNG image.');
+      this.value = '';
+      return;
+    }
+    $placeholder.hide();
+    $img.removeClass('hidden');
+    $img.attr('src', objectUrlFromFile(file));
+    // Wait for the <img> to load to init cropper
+    $img.one('load', function() { initCropper(); });
+  });
+
+  $('#saveCroppedPhoto').on('click', function() {
+    if (!cropper) return;
+    var canvas = cropper.getCroppedCanvas({ width: 700, height: 900 });
+    if (!canvas) { alert('Could not crop the image.'); return; }
+
+    // Convert to Blob and upload via AJAX as multipart/form-data
+    canvas.toBlob(function(blob) {
+      if (!blob) { alert('Could not prepare image.'); return; }
+      var formData = new FormData();
+      formData.append('file', blob, 'id-photo.jpg');
+      formData.append('userId', '${userId}');
+
+      var csrf = getCsrf();
+      $.ajax({
+        url: '${pageContext.request.contextPath}/api/userphoto/${userId}',
+        method: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        beforeSend: function(xhr) {
+          if (csrf) xhr.setRequestHeader(csrf.header, csrf.token);
+          $save.prop('disabled', true).text('Saving…');
+        }
+      }).done(function() {
+        $save.text('Saved');
+        // Optional: update any thumbnail on the page
+        // $('#currentPhotoThumb').attr('src', canvas.toDataURL('image/jpeg', 0.92));
+        closeModal();
+      }).fail(function(xhr) {
+        alert('Failed to save photo: ' + (xhr.responseText || xhr.statusText));
+        $save.prop('disabled', false).text('Save');
+      });
+    }, 'image/jpeg', 0.92);
+  });
+
+})(jQuery);
+</script>
+
+---------
+
+package com.example.web;
+
+import com.example.service.UserPhotoService;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+
+@RestController
+@RequestMapping("/api/userphoto")
+public class UserPhotoController {
+
+    private final UserPhotoService userPhotoService;
+
+    public UserPhotoController(UserPhotoService userPhotoService) {
+        this.userPhotoService = userPhotoService;
+    }
+
+    @PostMapping(
+        value = "/{userId}",
+        consumes = MediaType.MULTIPART_FORM_DATA_VALUE,
+        produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public ResponseEntity<?> uploadUserPhoto(
+            @PathVariable("userId") Long userId,
+            @RequestParam("file") MultipartFile file) throws IOException {
+
+        if (file == null || file.isEmpty()) {
+            return ResponseEntity.badRequest().body("{\"error\":\"File is empty\"}");
+        }
+
+        // Basic content-type check (client sends image/jpeg from canvas.toBlob)
+        String contentType = file.getContentType();
+        if (contentType == null ||
+            !(contentType.equalsIgnoreCase(MediaType.IMAGE_JPEG_VALUE)
+              || contentType.equalsIgnoreCase(MediaType.IMAGE_PNG_VALUE))) {
+            return ResponseEntity.badRequest().body("{\"error\":\"Only JPEG or PNG is allowed\"}");
+        }
+
+        // Size guard (adjust limits as needed)
+        long maxBytes = 5L * 1024 * 1024; // 5 MB
+        if (file.getSize() > maxBytes) {
+            return ResponseEntity.badRequest().body("{\"error\":\"File too large (max 5MB)\"}");
+        }
+
+        // Sanity check that it really is an image
+        BufferedImage img = ImageIO.read(file.getInputStream());
+        if (img == null) {
+            return ResponseEntity.badRequest().body("{\"error\":\"Invalid image data\"}");
+        }
+
+        // Optional: enforce target dimensions coming from client crop (700x900)
+        if (img.getWidth() < 350 || img.getHeight() < 450) {
+            return ResponseEntity.badRequest().body("{\"error\":\"Image too small. Please use the crop tool.\"}");
+        }
+
+        byte[] bytes = file.getBytes(); // already JPEG from client; OK to store as-is
+
+        // Replace existing non-approved photo or create new pending one
+        userPhotoService.saveOrReplacePending(userId, bytes, contentType, img.getWidth(), img.getHeight());
+
+        return ResponseEntity.ok("{\"status\":\"ok\"}");
+    }
+}
+
+---------
+
+package com.example.domain;
+
+import javax.persistence.*;
+
+@Entity
+@Table(name = "user_photo")
+public class UserPhoto {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private Long userId;
+
+    @Lob
+    @Basic(fetch = FetchType.LAZY)
+    @Column(name = "photo_blob", nullable = false)
+    private byte[] photo;
+
+    @Column(name = "content_type", length = 64)
+    private String contentType;
+
+    @Column(name = "width_px")
+    private Integer width;
+
+    @Column(name = "height_px")
+    private Integer height;
+
+    @Enumerated(EnumType.STRING)
+    @Column(length = 32)
+    private ApprovalStatus status; // PENDING, APPROVED, REJECTED
+
+    // getters/setters
+
+    public enum ApprovalStatus {
+        PENDING, APPROVED, REJECTED
+    }
+}
+
+------
+package com.example.repo;
+
+import com.example.domain.UserPhoto;
+import com.example.domain.UserPhoto.ApprovalStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface UserPhotoRepository extends JpaRepository<UserPhoto, Long> {
+
+    // The “not approved” photo you mentioned sounds like PENDING (or REJECTED). Adjust as needed.
+    Optional<UserPhoto> findFirstByUserIdAndStatusOrderByIdDesc(Long userId, ApprovalStatus status);
+
+    // If you keep a single active photo per user regardless of status
+    Optional<UserPhoto> findFirstByUserIdOrderByIdDesc(Long userId);
+}
+
+----
+
+package com.example.service;
+
+import com.example.domain.UserPhoto;
+import com.example.domain.UserPhoto.ApprovalStatus;
+import com.example.repo.UserPhotoRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class UserPhotoService {
+
+    private final UserPhotoRepository repo;
+
+    public UserPhotoService(UserPhotoRepository repo) {
+        this.repo = repo;
+    }
+
+    /**
+     * Replace an existing not-approved (PENDING) photo for this user,
+     * or create a new PENDING record if none exists.
+     */
+    @Transactional
+    public void saveOrReplacePending(Long userId,
+                                     byte[] bytes,
+                                     String contentType,
+                                     int width,
+                                     int height) {
+
+        UserPhoto entity = repo.findFirstByUserIdAndStatusOrderByIdDesc(userId, ApprovalStatus.PENDING)
+                .orElseGet(() -> {
+                    UserPhoto np = new UserPhoto();
+                    np.setUserId(userId);
+                    np.setStatus(ApprovalStatus.PENDING);
+                    return np;
+                });
+
+        entity.setPhoto(bytes);
+        entity.setContentType(contentType);
+        entity.setWidth(width);
+        entity.setHeight(height);
+
+        repo.save(entity);
+    }
+}
+
+
+-----// In your @Configuration class
+     @Bean
+     public org.springframework.web.multipart.MultipartResolver multipartResolver() {
+         return new org.springframework.web.multipart.support.StandardServletMultipartResolver();
+     }
+
+
+
+     ------
+
+
+     <servlet>
+       <servlet-name>dispatcher</servlet-name>
+       <servlet-class>org.springframework.web.servlet.DispatcherServlet</servlet-class>
+       <init-param>
+         <param-name>contextConfigLocation</param-name>
+         <param-value>/WEB-INF/spring/dispatcher-servlet.xml</param-value>
+       </init-param>
+       <load-on-startup>1</load-on-startup>
+       <multipart-config>
+         <!-- Adjust limits -->
+         <max-file-size>5242880</max-file-size>        <!-- 5MB -->
+         <max-request-size>5242880</max-request-size>
+         <file-size-threshold>0</file-size-threshold>
+       </multipart-config>
+     </servlet>
